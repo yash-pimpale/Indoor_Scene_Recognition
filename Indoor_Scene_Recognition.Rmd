@@ -1,0 +1,516 @@
+---
+title: "Indoor scene recognition"
+author: "Yash Pimpale"
+date: "02 April 2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, error = FALSE, warning = FALSE)
+```
+
+## Problem Definition
+
+The folder data_indoor.zip contains images concerning different indoor scenes from rooms and locations commonly present in a standard family home. The task is to predict the type of room/scene present in the image. Indoor scene recognition is a challenging problem since some indoor scenes can be well defined by global spatial and structural properties, while others are better characterized by the objects included in the space. The dataset is a subset of a larger dataset for indoor scene recognition. More information is available here: http://web.mit.edu/torralba/www/indoor.html.
+
+The images are divided into train, validation, and test folders, each containing the folders related to the type
+of the room in the image (i.e. the categories of the target variable): bathroom, bedroom, children_room, closet, corridor, dining_room, garage, kitchen, living_room, stairs. The number of images available for each scene is
+variable and it ranges from 52 to 367 in the training set, with validation and test sets being roughly half the size.
+
+The task is to build a predictive model to predict the type of indoor scene from the image data by deploying at least 4 different deep learning systems characterized by different configurations, hyperparameters, and training settings (architecture, number of hidden units, regularization, kernel size, filter size, optimization, etc.).
+
+## Model Deployment & Training
+
+We will use 4 convolution neural networks since in deep neural network we use flattened 1D vectors of images and disregard the image spatial structure. For image classification, machine learning method should recognize the local features close to each other relevant to the task. CNN's are used for processing data with grid-like topology, which have strong dependencies in local regions of the grid. Hence they are good for image classification.  
+
+We will train 2 models with data augmentation on the images and 2 models without data augmentation. Image augmentation is basically applying different transformations to original images which results in multiple transformed copies of the same image. It does not change its target class but incorporate some variation in the dataset which allows model to generalize better on unseen data. Below data augmentations are performed on the images:-  
+
+**• Rotation** - It randomly rotate images through any degree between 0 and 360. We have use degree as 10. When the image is rotated, some pixels moves outside the image and leave an empty area that needs to be filled in. Hence we will use “nearest” which will replaces the empty area with the nearest pixel values.  
+**• Shifts** - It often happens that object is not always at the center of the image which is apparent in our case of indoor images. To overcome this, we can shift pixel of the image either horizontally or vertically randomly. "width_shift_range" shifts image horizontally while "height_shift_range" shifts image vertically. We will shift image by 25% for both the direction.   
+**• Flip** - It flips images randomly on the vertical axis. Since we are classifying house indoor images, we will only use horizontal flip.  
+**• Brightness Range** - It randomly changes the brightness of the image. Based on our dataset, most of the time the object are not under perfect lighting condition. So it better to train our model on images under different lighting conditions. We will use brightness range of 0.7 to 1.3, with 1.3 being the brightest.  
+**• Zoom Range** - It randomly zooms in on the image or zooms out of the image. Since we need to classify some classes as bathroom, kitchen, etc, which are wide in range and requires few specific objects to be located, we will use zoom range of 15%.  
+
+### Model 1
+
+This model contains 3 sub-layers in convolution layer with ReLU as activation function. It will provide a feature map as output. All the 3 sub-layer contains a kernel of size (3, 3) and padding. Kernel is a filter that is used to extract the features from the images. The kernel is a matrix that moves over the input data, performs the dot product with the sub-region of input data and gets the output as the matrix of dot products. Kernel moves on the input data by the stride value. If the stride value is 2, then kernel moves by 2 columns of pixels in the input matrix. The kernel is used to extract high-level features like edges from the image. Since we apply filters on the input data, convolution reduces the size of output by a factor of (k − 1) over width and height, this results in loss of some information along the borders of the image. Hence we will use padding which will add the this (k - 1) pixels around the borders of the feature map and hence maintain the spatial dimension after convolution.  
+
+The input layer contains 32 filters and the input size is set to 64x64x3 since we have coloured images. We get an output shape as 64x64x32. This layer is then connected to a pooling layer which will reduce the width and height of the image keeping depth unchanged. The pool size is set to (2, 2) with a stride of 2. Stride is the pace at which the kernel scans the input. It will reduce the size of the feature map. The output shape of this layer is 32x32x32. The second sub-layer contains 64 filters with a kernel size of (3, 3) and ReLU activation. This layer is then again connected to a pooling layer with parameters same as mentioned above. Thus the output shape is 16x16x64. The 3rd sub-layer is same as the 2nd sub-layer and again connected to a pooling layer. The output of the convolution layer produces a tensor of dimension 8x8x64.  
+
+The learned features from convolution layer are flattened into a 1D vector and forwarded to the fully-connected layers. The fully connected layers do not take any spatial structure into consideration and are composed of multiple layer neural network. The input to this network are the features learned by the convolutional layer. The fully connected layers have 5 sub-layers with number of units decreasing from 512, 256, 128, 64 to 10 with ReLU activation and as leaky rate as 0.01. The output layer contains 10 units since we have images for 10 classes. Each layer gradually reduces the number of parameters to reach final value of 650 at the output layer. It has softmax activation.  
+
+Adam optimizer with learning rate of 0.001 is used to compile accuracy and categorical cross entropy loss of the model. Adaptive Moment Estimation (Adam) optimization method computes individual adaptive learning rates for different parameters from estimates of the first and second moments of the gradients. It tends to converge faster then the stochastic gradient descent (SGD).  
+
+We will train the model with the original data (i.e. images without augmentation) for 20 epochs with 53 steps (number of samples in training set divided by 32) per epoch.
+
+```{r CNN Model 1}
+
+  #Load required libraries
+  library(reticulate)
+  library(keras)
+  library(tensorflow)
+  library(rlang)
+  library(tibble)
+  library(dplyr)
+  library(caret)
+  set.seed(22202250)
+  
+  #Load Image data
+
+  train_dir = "data_indoor/train"
+  validation_dir = "data_indoor/validation"
+  test_dir = "data_indoor/test"
+  batch_size = 32
+  
+  #Without data augmentation
+  
+  #Rescale Images
+  train_datagen = image_data_generator(rescale = 1/255)
+  validation_datagen = image_data_generator(rescale = 1/255)
+  test_datagen = image_data_generator(rescale = 1/255)
+  
+  #Load Training set Images
+  train_generator = flow_images_from_directory(
+    train_dir,
+    train_datagen,
+    target_size = c(64, 64),
+    batch_size = batch_size,
+    class_mode = "categorical"
+  )
+  
+  y_train = train_generator$classes
+  y_train = to_categorical(y_train)
+  
+  #Load Validation set Images
+  validation_generator = flow_images_from_directory(
+    validation_dir,
+    validation_datagen,
+    target_size = c(64, 64),
+    batch_size = 20,
+    class_mode = "categorical"
+  )
+  
+  y_val = validation_generator$classes
+  y_val = to_categorical(y_val)
+  
+  #Load Test set Images
+  test_generator = flow_images_from_directory(
+    test_dir,
+    test_datagen,
+    target_size = c(64, 64),
+    batch_size = batch_size,
+    class_mode = "categorical"
+  )
+  
+  y_test = test_generator$classes
+  y_test = to_categorical(y_test)
+  
+  #Number of training samples
+  train_samples = train_generator$n
+  
+  #Number of validation samples
+  valid_samples = validation_generator$n
+  
+  #Create a CNN Neural Network
+  
+  #Model 1 - CNN 
+  
+  CNN_Model_1 <- keras_model_sequential() %>%
+    
+    #convolutional layers
+    layer_conv_2d(filters = 32, name = "Layer_1", kernel_size = c(3, 3), activation = "relu", padding='same', input_shape = c(64, 64, 3)) %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    layer_conv_2d(filters = 64, name = "Layer_2", kernel_size = c(3, 3), activation = "relu", padding='same') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    layer_conv_2d(filters = 64, name = "Layer_3", kernel_size = c(3, 3), activation = "relu", padding='same') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    
+    #fully connected layers
+    layer_flatten() %>%
+    layer_dense(units = 512, activation = "relu") %>%
+    layer_activation_leaky_relu(alpha = 0.01)  %>%
+    layer_dense(units = 256, activation = "relu") %>%
+    layer_activation_leaky_relu(alpha = 0.01)  %>%
+    layer_dense(units = 128, activation = "relu") %>%
+    layer_activation_leaky_relu(alpha = 0.01)  %>%
+    layer_dense(units = 64, activation = "relu") %>%
+    layer_activation_leaky_relu(alpha = 0.01)  %>%
+    layer_dense(units = 10, activation = "softmax", name = "Output") %>%
+    
+    compile(
+      loss = "categorical_crossentropy",
+      metrics = "accuracy",
+      optimizer = optimizer_adam(learning_rate = 0.001)
+    )
+  
+  #Train with data augmentation
+  fit_CNN_Model_1 <- CNN_Model_1 %>% fit(
+    train_generator,
+    steps_per_epoch = as.integer(train_samples / batch_size),
+    epochs = 20,
+    validation_data = validation_generator,
+    validation_steps = as.integer(valid_samples / batch_size),
+    verbose = 0
+  )
+
+```
+
+## Model 2
+
+This model is almost same as the Model 1 i.e. it contains 3 sub-layers in convolution layer with ReLU activation function. Also all the 3 sub-layer contains a kernel of size (3, 3) and padding. The input layer contains 32 filters and the input size is set to 64x64x3. We get an output shape as 64x64x32. This layer is then connected to a pooling layer with pool size set to (2, 2) with a stride of 2. The output shape of this layer is 32x32x32. The second sub-layer contains 64 filters with a kernel size of (3, 3) and ReLU activation. This layer is then again connected to a pooling layer with parameters same as mentioned above. Thus the output shape is 16x16x64. The 3rd sub-layer is same as the 2nd sub-layer and again connected to a pooling layer. The output of the convolution layer produces a tensor of dimension 8x8x64.  
+
+The learned features from convolution layer are flattened into a 1D vector and forwarded to the fully-connected layers. The features learned by the convolutional layer are sent as input to this fully-connected network. It has 5 sub-layers with number of units decreasing from 512, 256, 128, 64 to 10 with ReLU activation and as leaky rate as 0.01. The output layer contains 10 units since we have images for 10 classes. Each layer gradually reduces the number of parameters to reach final value of 650 at the output layer. The output layer has softmax activation.  
+
+SGD optimizer with learning rate of 0.001 and momentum as 0.8 is used to compile accuracy and categorical cross entropy loss of the model. It is a variant of the standard SGD optimizer that helps accelerate the convergence of the optimization process.  
+
+We will train the model with the image augmentation data for 20 epochs with 53 steps (number of samples in training set divided by 32) per epoch.  
+
+```{r Model 2}
+
+  #Load Images With data augmentation
+  
+  #Set data augmentation generator
+  data_augment = image_data_generator(
+    rescale = 1/255,
+    rotation_range = 10,
+    fill_mode = "nearest",
+    width_shift_range = 0.25,
+    height_shift_range = 0.25,
+    horizontal_flip = TRUE,
+    brightness_range = c(0.7,1.3),
+    zoom_range = 0.15
+  )
+  
+  #Load Training set Images
+  train_generator_aug = flow_images_from_directory(
+    train_dir,
+    data_augment,
+    target_size = c(64, 64),
+    batch_size = batch_size,
+    class_mode = "categorical"
+  )
+  
+  y_train_aug = train_generator_aug$classes
+  y_train_aug = to_categorical(y_train_aug)
+  
+  #Load Validation set Images
+  validation_generator_aug = flow_images_from_directory(
+    validation_dir,
+    data_augment,
+    target_size = c(64, 64),
+    batch_size = batch_size,
+    class_mode = "categorical"
+  )
+  
+  y_val_aug = validation_generator_aug$classes
+  y_val_aug = to_categorical(y_val_aug)
+  
+  #Load Test set Images
+  test_generator_aug = flow_images_from_directory(
+    test_dir,
+    data_augment,
+    target_size = c(64, 64),
+    batch_size = batch_size,
+    class_mode = "categorical"
+  )
+  
+  y_test_aug = test_generator_aug$classes
+  y_test_aug = to_categorical(y_test_aug)
+  
+  #Number of training samples
+  train_samples_aug = train_generator_aug$n
+  
+  #Number of validation samples
+  valid_samples_aug = validation_generator_aug$n
+  
+  #Create a CNN Neural Network
+  
+  #Model 2 - CNN 
+  
+  CNN_Model_2 <- keras_model_sequential() %>%
+    
+    #convolutional layers
+    layer_conv_2d(filters = 32, name = "Layer_1", kernel_size = c(3, 3), activation = "relu", padding='same', input_shape = c(64, 64, 3)) %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    layer_conv_2d(filters = 64, name = "Layer_2", kernel_size = c(3, 3), activation = "relu", padding='same') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    layer_conv_2d(filters = 64, name = "Layer_3", kernel_size = c(3, 3), activation = "relu", padding='same') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    
+    #fully connected layers
+    layer_flatten() %>%
+    layer_dense(units = 512, activation = "relu") %>%
+    layer_activation_leaky_relu(alpha = 0.01)  %>%
+    layer_dense(units = 256, activation = "relu") %>%
+    layer_activation_leaky_relu(alpha = 0.01)  %>%
+    layer_dense(units = 128, activation = "relu") %>%
+    layer_activation_leaky_relu(alpha = 0.01)  %>%
+    layer_dense(units = 64, activation = "relu") %>%
+    layer_activation_leaky_relu(alpha = 0.01)  %>%
+    layer_dense(units = 10, activation = "softmax", name = "Output") %>%
+    
+    compile(
+      loss = "categorical_crossentropy",
+      metrics = "accuracy",
+      optimizer = optimizer_sgd(learning_rate = 0.001, momentum = 0.8)
+    )
+  
+  #Train with data augmentation
+  fit_CNN_Model_2 <- CNN_Model_2 %>% fit(
+    train_generator_aug,
+    steps_per_epoch = as.integer(train_samples_aug / batch_size),
+    epochs = 20,
+    validation_data = validation_generator_aug,
+    validation_steps = as.integer(valid_samples_aug / batch_size),
+    verbose = 0
+  )  
+
+```
+
+### Model 3
+
+This model contains 4 sub-layers in convolution layer with ReLU as activation function. All the 4 sub-layer contains a kernel of size (3, 3) and padding. The input layer contains 32 filters and the input size is set to 64x64x3 since we have colored images. We get an output shape as 64x64x32. This layer is then connected to a pooling layer with pool size is set to (2, 2) with a stride of 2. The output shape of this layer is 32x32x32. The second sub-layer contains 64 filters with a kernel size of (3, 3) and ReLU activation. This layer is then again connected to a pooling layer with parameters same as mentioned above. The the output shape is 16x16x64. The 3rd sub-layer contains 128 filters and a kernel size of (3, 3) with ReLU activation. This layer is again connected to a pooling layer to get the output shape as 8x8x128. The 4th sub-layer contains 256 filters with a kernel size of (3, 3) and ReLU activation. The layer is connected to a pooling layer to get the output shape as 4x4x256.  
+
+The learned features from convolution layer are flattened into a 1D vector and forwarded to the fully-connected layers. The fully connected layers have 4 sub-layers. The 1st sub-layer contains 512 units and ReLU activation to get 2097664 parameters. It is then connected to 2nd sub-layer which has 256 units. 3rd sub-layer consists of 128 units which is then connected to output layer with 10 units for 10 classes (1 for each class). The output layer has softmax activation and 1290 parameters. Kernel L2 regularizer is added to all the sub-layers with value of 0.003.  
+
+Adam optimizer with learning rate of 0.001 is used to compile accuracy and categorical cross entropy loss of the model. We will train the model with the original data (i.e. images without augmentation) for 20 epochs with 53 steps (number of samples in training set divided by 32) per epoch.  
+
+```{r Model 3}
+
+  #Model 3 - CNN 
+  
+  CNN_Model_3 <- keras_model_sequential() %>%
+    
+    #convolutional layers
+    layer_conv_2d(filters = 32, name = "Layer_1", kernel_size = c(3, 3), activation = "relu", padding='same', input_shape = c(64, 64, 3)) %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    layer_conv_2d(filters = 64, name = "Layer_2", kernel_size = c(3, 3), activation = "relu", padding='same') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    layer_conv_2d(filters = 128, name = "Layer_3", kernel_size = c(3, 3), activation = "relu", padding='same') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    layer_conv_2d(filters = 256, name = "Layer_4", kernel_size = c(3, 3), activation = "relu", padding='same') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    
+    #fully connected layers
+    layer_flatten() %>%
+    layer_dense(units = 512, activation = "relu", kernel_regularizer = regularizer_l2(0.003)) %>%
+    layer_dense(units = 256, activation = "relu", kernel_regularizer = regularizer_l2(0.003)) %>%
+    layer_dense(units = 128, activation = "relu", kernel_regularizer = regularizer_l2(0.003)) %>%
+    layer_dense(units = 10, activation = "softmax", name = "Output") %>%
+    
+    compile(
+      loss = "categorical_crossentropy",
+      metrics = "accuracy",
+      optimizer = optimizer_adam(learning_rate = 0.001)
+    )
+  
+  #Train with data augmentation
+  fit_CNN_Model_3 <- CNN_Model_3 %>% fit(
+    train_generator,
+    steps_per_epoch = as.integer(train_samples / batch_size),
+    epochs = 20,
+    validation_data = validation_generator,
+    validation_steps = as.integer(valid_samples / batch_size),
+    verbose = 0
+  )
+
+```
+
+### Model 4
+
+This mode contains 6 sub-layers in convolution layer with ReLU as activation function. All the 6 sub-layer contains a kernel of size (3, 3) and padding. The input layer contains 32 filters and the input size is set to 64x64x3 since we have coloured images and connected to pooling layer to get an output shape as 32x32x32. The 2nd sub-layer also contains 64 filters and ReLU activation. This layer is then connected to a pooling layer with pool size is set to (2, 2) with a stride same as pool size. The output shape of this layer is 16x16x64. The 3rd sub-layers containing 128 filters with a kernel size of (3, 3) and ReLU activation. It is then connected to a pooling layer with parameters same as mentioned above. The output shape is 8x8x128. The 4th sub-layers contains 256 filters and a kernel size of (3, 3) with ReLU activation. This layer is again connected to a pooling layer to get the output shape as 4x4x256.  
+
+The learned features from convolution layer are flattened into a 1D vector and forwarded to the fully-connected layers. The fully connected layers have 4 sub-layers. Except for the output layer, all layers contains ReLU activation with leaky rate as 0.01. The 1st sub-layer contains 512 units to get 2097664 parameters. It is then connected to 2nd sub-layer with 256 units which is then connected to 3rd sub-layer with 128 units. The output layer contains 10 units for 10 classes (1 for each class). The output layer has softmax activation and 1290 parameters.
+
+SGD optimizer with learning rate of 0.001 and momentum as 0.8 is used to compile accuracy and categorical cross entropy loss of the model. We will train the model with the image augmentation data for 20 epochs with 53 steps (number of samples in training set divided by 32) per epoch.  
+
+```{r Model 4}
+
+  #Model 4 - CNN 
+  CNN_Model_4 <- keras_model_sequential() %>%
+    
+    #convolutional layers
+    layer_conv_2d(filters = 32, name = "Layer_1", kernel_size = c(3, 3), activation = "relu", padding='same', input_shape = c(64, 64, 3)) %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    layer_conv_2d(filters = 64, name = "Layer_2", kernel_size = c(3, 3), activation = "relu", padding='same') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    layer_conv_2d(filters = 128, name = "Layer_3", kernel_size = c(3, 3), activation = "relu", padding='same') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    layer_conv_2d(filters = 256, name = "Layer_4", kernel_size = c(3, 3), activation = "relu", padding='same') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2), stride = 2) %>%
+    
+    #fully connected layers
+    layer_flatten() %>%
+    layer_dense(units = 512, activation = "relu") %>%
+    layer_dense(units = 256, activation = "relu") %>%
+    layer_dense(units = 128, activation = "relu") %>%
+    layer_dense(units = 10, activation = "softmax", name = "Output") %>%
+    
+    compile(
+      loss = "categorical_crossentropy",
+      metrics = "accuracy",
+      optimizer = optimizer_sgd(learning_rate = 0.001, momentum = 0.8)
+    )
+  
+  #Train with data augmentation
+  fit_CNN_Model_4 <- CNN_Model_4 %>% fit(
+    train_generator_aug,
+    steps_per_epoch = as.integer(train_samples_aug / batch_size),
+    epochs = 20,
+    validation_data = validation_generator_aug,
+    validation_steps = as.integer(valid_samples_aug / batch_size),
+    verbose = 0
+  )
+
+```
+
+## Comparing Accuray and Loss Metrics
+
+We will appropriately compare the deep learning systems considered, evaluate and discuss their relative merits based on their training and predictive performance, and select the best model at predicting the type of indoor scene from the data.  
+
+We will now plot the accuracy and loss for each model on training and validation data.
+
+```{r, fig.height = 7, fig.width = 10, fig.align='center'}
+
+  #Plots for Accuracy on Training sets
+
+  #Function to add a smooth line to points in plot
+  smooth_line <- function(y) {
+    x = 1:length(y)
+    out = predict(loess(y ~ x))
+    return(out)
+  }
+  
+  #Colours for each line
+  cols = c("#3bd4c4", "#e31b54", "#d92bd3", "#09e845")
+  
+  #Plot Accuracy of both the models
+  out = cbind(fit_CNN_Model_1$metrics$accuracy,
+              fit_CNN_Model_2$metrics$accuracy,
+              fit_CNN_Model_3$metrics$accuracy,
+              fit_CNN_Model_4$metrics$accuracy)
+  
+  #Check performance
+  matplot(out, pch = 19, ylab = "Accuracy", xlab = "Epochs", col = adjustcolor(cols, 0.3), log = "y", main = "Accuracy Comparison on Training data")
+  matlines(apply(out, 2, smooth_line), lty = 1, col = cols, lwd = 2)
+  legend("topleft", legend = c("CNN Model 1", "CNN Model 2", "CNN Model 3", "CNN Model 4"), fill = cols, bty = "n")
+  
+```
+
+We can observe that the model 1 (99%) and 3 (70%) which were trained using original data i.e. images without augmentation, the accuracy of these models is very high. Initially model 1 had the highest accuracy on training data but later it's accuracy becomes stagnant and eventually settles at 99% at the end of 20th epoch. The accuracy of model 3 gradually increases by each epoch and finally reaches its final value of around 70% at the 20th epoch. Model 2 and 4 were trained using augmented images, hence the accuracy has dipped significantly. The accuracy of model 2 and 4 follows the same curves and the accuracy stays at around 22% at the end.  
+
+```{r, fig.height = 7, fig.width = 10, fig.align='center'}
+
+  #Plots for Accuracy on Validation sets
+
+  out = cbind(fit_CNN_Model_1$metrics$val_accuracy,
+              fit_CNN_Model_2$metrics$val_accuracy,
+              fit_CNN_Model_3$metrics$val_accuracy,
+              fit_CNN_Model_4$metrics$val_accuracy)
+  
+  #Check performance
+  matplot(out, pch = 19, ylab = "Accuracy", xlab = "Epochs", col = adjustcolor(cols, 0.3), log = "y", main = "Accuracy Comparison on Validation data")
+  matlines(apply(out, 2, smooth_line), lty = 1, col = cols, lwd = 2)
+  legend("topleft", legend = c("CNN Model 1", "CNN Model 2", "CNN Model 3", "CNN Model 4"), fill = cols, bty = "n")
+  
+```
+
+We observe the same behavior of the accuracy on validation data. Accuracy of model 1 and 3 is higher than the model 2 and 4. Initially model 1 had the highest accuracy of around 36% but later it's accuracy becomes steady and becomes slightly lower than the model 3 at the end of 20th epoch. The accuracy of model 3 gradually increases and finally reaches the final value of around 37% at the 20th epoch. The accuracy of model 4 initially was high as compare to model 2 but it keeps on reducing after the 15th epoch to reach lowest accuracy of 22% whereas the accuracy of model 2 was low initially but it keeps on increasing to reach the final accuracy of around 24%.
+
+```{r, fig.height = 7, fig.width = 10, fig.align='center'}
+
+  #Plots for Loss on Training sets
+
+  #Plot Accuracy of both the models
+  out = cbind(fit_CNN_Model_1$metrics$loss,
+              fit_CNN_Model_2$metrics$loss,
+              fit_CNN_Model_3$metrics$loss,
+              fit_CNN_Model_4$metrics$loss)
+  
+  #Check performance
+  matplot(out, pch = 19, ylab = "Loss", xlab = "Epochs", col = adjustcolor(cols, 0.3), log = "y", main = "Loss Comparison on Training data")
+  matlines(apply(out, 2, smooth_line), lty = 1, col = cols, lwd = 2)
+  legend("bottomleft", legend = c("CNN Model 1", "CNN Model 2", "CNN Model 3", "CNN Model 4"), fill = cols, bty = "n")
+
+```
+
+The training loss for model 2 and 4 decreases very slightly at the start but it remains (around 2.0) the same throughout the training epoch, which is very high. The training process is stable but quite slow. The training loss of model 1 keeps on decreasing significantly throughout the training epoch to reach the minimum at the 17th epoch but it increases again to reach around 0.15 at the 20th epoch. The training loss of model 3 starts to reduce by 8th epoch and keeps on decreasing exponentially to reach value of 1.
+
+```{r, fig.height = 7, fig.width = 10, fig.align='center'}
+
+  #Plots for Loss on Validation sets
+
+  #Plot Accuracy of both the models
+  out = cbind(fit_CNN_Model_1$metrics$val_loss,
+              fit_CNN_Model_2$metrics$val_loss,
+              fit_CNN_Model_3$metrics$val_loss,
+              fit_CNN_Model_4$metrics$val_loss)
+  
+  #Check performance
+  matplot(out, pch = 19, ylab = "Loss", xlab = "Epochs", col = adjustcolor(cols, 0.3), log = "y", main = "Loss Comparison on Validation data")
+  matlines(apply(out, 2, smooth_line), lty = 1, col = cols, lwd = 2)
+  legend("topleft", legend = c("CNN Model 1", "CNN Model 2", "CNN Model 3", "CNN Model 4"), fill = cols, bty = "n")
+
+```
+
+The validation loss of mode 1 dips at the start but starts to increase exponentially by 5th epoch and reaches the maximum of 4.6. The validation loss of Model 3 keeps on decreasing initially but starts to increase significantly to reach maximum loss of around 2.7. Model 1 and 3 has the highest loss which is not good. As same with the training loss, the validation loss of model 2 and 4 decreases very slightly initially and remains steady throughout the epoch to reach the minimum validation loss of around 2.  
+
+We will now evaluate predictive performance on training data for each model and check for the best fit.
+
+```{r Model evaluation}
+
+  class_labels = c("bathroom", "bedroom", "children_room", "closet", "corridor", "dinning_room",
+                    "garage", "kitchen", "living_room", "stairs")
+
+  #Model 1 Predict Training
+  class_y = class_labels[max.col(y_train)]
+  class_train_hat_1 = class_labels[CNN_Model_1 %>% predict(train_generator) %>% max.col()]
+  tab_1 = table(class_y, class_train_hat_1)
+  #Compute class sensitivity
+  print(rbind(cbind(tab_1, cl_acc = diag(tab_1)/rowSums(tab_1))))
+  
+  #Model 2 Predict Training
+  class_y_aug = class_labels[max.col(y_train_aug)]
+  class_train_hat_2 = class_labels[CNN_Model_2 %>% predict(train_generator_aug) %>% max.col()]
+  tab_2 = table(class_y_aug, class_train_hat_2)
+  print(rbind(cbind(tab_2, cl_acc = diag(tab_2)/rowSums(tab_2))))
+  
+  #Model 3 Predict Training
+  class_train_hat_3 = class_labels[CNN_Model_3 %>% predict(train_generator) %>% max.col()]
+  tab_3 = table(class_y, class_train_hat_3)
+  print(rbind(cbind(tab_3, cl_acc = diag(tab_3)/rowSums(tab_3))))
+  
+  #Model 4 Predict Training
+  class_train_hat_4 = class_labels[CNN_Model_4 %>% predict(train_generator_aug) %>% max.col()]
+  tab_4 = table(class_y_aug, class_train_hat_4)
+  print(rbind(cbind(tab_4, cl_acc = diag(tab_4)/rowSums(tab_4))))
+  
+```
+
+From the above classification table, we can say that the model 2 and 4 are the worst model for image classification since they were able to classify images into only 2-3 classes. The overall accuracy of the models is very low as compared to the model 1 and 3. Also based on the graphs, the training and validation accuracy of the models are both very low indicating that the models are not able to capture the underlying patterns in the data. Also the training and validation loss is high (i.e. around 2 which is very far from zero), indicating that the model is not able to fit the data well. Hence we can say that the model 2 and 4 are underfitting.
+
+Model 1 and 3 are able to classify images into respective classes with better precision than the model 2 and 4. Although both the models have high training accuracy but have low validation accuracy indicating that the models are not able to generalize well to new data. Also training loss is low but the validation loss is high, indicating that the models are complex. We can say that model 1 and 3 are overfitting.
+
+But for our analysis, we will choose model 3 as the best model out of the above models since it is still able to classify images despite of overfitting.
+
+## Performance Evaluation on Test Data
+
+Now we will evaluate predictive performance for model 3 on testing data.
+
+```{r predict test data}
+
+  #Evaluate accuracy of test set of model 3
+  AL = CNN_Model_3 %>% evaluate(test_generator, y_test, verbose = 0)
+  print(paste0("Accuracy of Model 3 on Test data is ", AL[2]*100))
+  
+  print(paste0("Loss of Model 3 on Test data is ", AL[1]))
+  
+  #Model 3 Predict Test and display classification table
+  class_ty = class_labels[max.col(y_test)]
+  class_test_hat = class_labels[CNN_Model_3 %>% predict(test_generator) %>% max.col()]
+  tab = table(class_ty, class_test_hat)
+  print(rbind(cbind(tab, cl_acc = diag(tab)/rowSums(tab))))
+
+```
+
+The accuracy of model 3 on test data is around 35%, which is decent considering the model was overfitting and didn't have good validation accuracy. Although the testing loss is high. The model is able to classify images into respective classes (all 10 classes) with although poor accuracy. As per the classification table, the model is classifying most of the images into bedroom, kitchen and living room class while least images were classified into children room and closet class. To make model adaptable to new data, we may need to to train model with more training data i.e. augment input images so that model can learn underlying patterns, since it was evident that validation accuracy was much less than the training accuracy.
